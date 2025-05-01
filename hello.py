@@ -88,7 +88,7 @@ def reader_and_export(
 
     # TODO: From Ruby data, the accepted headers are MON-24, MON-23, ...
 
-    _forward_months_cols = ["MON{used_int}".format(used_int=re.findall(r'[\-|\+]*\d+', i)[0]) for i in forward_months_cols]
+    _forward_months_cols = ["MON{used_int}".format(used_int=re.findall(r'([\-|\+]*\d+)', i)[0]) for i in forward_months_cols]
     _scenario_ids = [scenario_id] if isinstance(scenario_id, int) else list(scenario_id)
     _curve_codes = [curve_code] if isinstance(curve_code, str) else list(curve_code)
     _ccy_codes = [ccy_code] if isinstance(ccy_code, str) else list(ccy_code)
@@ -116,15 +116,15 @@ def reader_and_export(
     wb.save(output_filename)
 
     print("Excel file with multiple empty sheets created successfully!")
-    for scen, curve, ccy in product(_scenario_ids, _curve_codes, _ccy_codes):
+    for scen, curve, ccy in product(*[_scenario_ids, _curve_codes, _ccy_codes]):
         row = {"SCN_ID": scen, "CURVE_CODE": curve, "CCY_CODE": ccy}  # TODO: refactor this unnecessary assignment
 
         # current month data
         _curr_mth_df = _df.filter(
             (_df["AS_OF_DATE"] == CURR_DATE) &
-            (reduce(lambda x, y: x & y, [_df[c] == row[c] for c in _curve_identifiers]))
+            (reduce(lambda x, y: x.__and__(y), [_df[c] == row[c] for c in _curve_identifiers]))
         ).with_columns(
-            [pl.col(i).mul(pl.lit(100.0)) for i in _forward_months_cols]  # multiply MON{-i} by 100 (percent scaling)
+            *[pl.col(i).__mul__(pl.lit(100.0)) for i in _forward_months_cols],  # multiply MON{-i} by 100 (percent scaling)
         ).sort(
             ["DATASET_ID", "AS_OF_DATE"] + _curve_identifiers + ["curve_tenor_days"], descending=False
         ).select(
@@ -133,9 +133,9 @@ def reader_and_export(
         # prior month data
         _prior_mth_df = _df.filter(
             (_df["AS_OF_DATE"] == PRIOR_DATE) &
-            (reduce(lambda x, y: x & y, [_df[c] == row[c] for c in _curve_identifiers]))
+            (reduce(lambda x, y: x.__and__(y), [_df[c] == row[c] for c in _curve_identifiers]))
         ).with_columns(
-            [pl.col(i).__mul__(pl.lit(100.0)) for i in _forward_months_cols]  # multiply each MON{-i} col by 100
+            *[pl.col(i).__mul__(pl.lit(100.0)) for i in _forward_months_cols]  # multiply each MON{-i} col by 100
         ).sort(
             ["DATASET_ID", "AS_OF_DATE"] + _curve_identifiers + ["curve_tenor_days"], descending=False
         ).select(
@@ -167,7 +167,7 @@ def reader_and_export(
             _abs_diff_df = pd.DataFrame(
                 np.abs(_curr_mth_df[shifted_curr_cols].values - _prior_mth_df[shifted_prior_cols].values),
                 index=_curr_mth_df[_abs_diff_idx].values,
-                columns=shifted_curr_cols
+                columns=shifted_curr_cols,
             )
 
 
@@ -177,8 +177,8 @@ def reader_and_export(
             _shifted_prior_values = _prior_mth_df[shifted_prior_cols]
             _filtered_diff_df = _abs_diff_df[_abs_diff_df > 0.7].stack().reset_index()
             _filtered_diff_df.columns = ['Index', 'Column', 'AbsDiff']
-            _filtered_diff_df['Shifted Current Month'] = _shifted_curr_values.stack().reindex(_filtered_diff_df.set_index(['Index', 'Column']).index).values
-            _filtered_diff_df['Shifted Prior Month'] = _shifted_prior_values.stack().reindex(_filtered_diff_df.set_index(['Index', 'Column']).index).values
+            _filtered_diff_df['Shifted_Current_Month'] = _shifted_curr_values.stack().reindex(_filtered_diff_df.set_index(['Index', 'Column']).index).values
+            _filtered_diff_df['Shifted_Prior_Month'] = _shifted_prior_values.stack().reindex(_filtered_diff_df.set_index(['Index', 'Column']).index).values
             _filtered_diff_df.to_excel("variance_sheet.xlsx", index=False)
 
 
@@ -192,8 +192,8 @@ def reader_and_export(
 
 
 
-    if find_base_vs_shock:
-        print(_abs_diff_df.columns)
+        if find_base_vs_shock:
+            print(_abs_diff_df.columns)
 
 
 
@@ -203,7 +203,7 @@ def reader_and_export(
 
         # Create a mapping of column names to represent the combination of current and prior months
         combined_column_names = [
-            f"{curr_col}↔{prior_col}" for curr_col, prior_col in zip(shifted_curr_cols, shifted_prior_cols)
+            f"{curr_col}F-{prior_col}J" for curr_col, prior_col in zip(shifted_curr_cols, shifted_prior_cols)
         ]
 
         # Create the DataFrame with the combined column names
@@ -223,8 +223,8 @@ def reader_and_export(
 
         # Update the index to include the FORWARD_MTH information
         _combined_abs_df.index = pd.MultiIndex.from_tuples(
-            [(i[:-1], i[-1]) for i in _combined_abs_df.index.values],
-            names=_abs_diff_idx + ["FORWARD_MTH"]
+            [(*i[:-1], i[-1]) for i in _combined_abs_df.index.values],
+            names=_abs_diff_idx + ["FORWARD_MTH"],
         )
 
         # Assign the curr mth values which exceed abs tol
@@ -280,10 +280,10 @@ def reader_and_export(
 
         _combined_checks_above_tol_list.append(_combined_abs_df)  # append DataFrame exceeding tolerances
         if (_abs_diff_df.values > 0).any():
-            write_mode = "a" if output_filename.exists() else "w"
-            kwargs = {} if write_mode == "w" else {"if_sheet_exists": "new"}
+            _write_mode = "a" if output_filename.exists() else "w"
+            kwargs = {} if _write_mode == "w" else {"if_sheet_exists": "new"}
 
-            with pd.ExcelWriter(output_filename, engine="openpyxl", mode=write_mode, **kwargs) as writer:
+            with pd.ExcelWriter(output_filename, engine="openpyxl", mode=_write_mode, **kwargs) as writer:
                 
                 stacked_df = pd.concat(
                     [_curr_mth_df.assign(Source="Current Month"), _prior_mth_df.assign(Source="Prior Month")],
@@ -292,7 +292,7 @@ def reader_and_export(
                 )
 
                 # Write stacked DataFrame to single sheet
-                stacked_df.to_excel(
+                _ = stacked_df.to_excel(
                     writer,
                     sheet_name=truncate_sheet_name_length(f"{scen}_{curve}_{ccy}_Stacked", curve, max_length=31),
                     index=False
@@ -306,15 +306,15 @@ def reader_and_export(
                 )
 
 
-        # Apply formatting with openpyxl if needed
-        amber_fill = PatternFill(start_color="FFFFE0", end_color="FFFFE0", fill_type="solid")
-        tabfill = Color('FFFFBF00')
-        none_red_fill = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")
-        
-        sheet_names = truncate_sheet_name_length(f"{scen}_{curve}_{ccy}_ABS-DIFF", curve, max_length=31)
+            # Apply formatting with openpyxl if needed
+            amber_fill = PatternFill(start_color="FFFFE0", end_color="FFFFE0", fill_type="solid")
+            tabfill = Color('FFFFBF00')
+            none_red_fill = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")
+            
+            sheet_names = truncate_sheet_name_length(f"{scen}_{curve}_{ccy}_ABS-DIFF", curve, max_length=31)
 
-        workbook_path = output_filename
-        wb = load_workbook(workbook_path)
+            workbook_path = output_filename
+            wb = load_workbook(workbook_path)
 
 
 
@@ -345,14 +345,14 @@ def reader_and_export(
         # For a dataframe as matrix, incl. of index columns. Note that the header counts as additional + 1 row
         #print(_abs_diff_df.columns)
 
-        _abs_diff_df = _abs_diff_df.reset_index()
-        _abs_diff_df_2 = _abs_diff_df.drop(columns=["SCN_NAME"], axis=1, inplace=True)
+        _abs_diff_df_2 = _abs_diff_df.reset_index()
+        _abs_diff_df_2 = _abs_diff_df_2.drop(columns=["SCN_NAME"], axis=1, inplace=True)
         print(_abs_diff_df_2.shape)
 
 
         _orig_row, _orig_col = _abs_diff_df_2.shape
 
-        _start_of_mon = _abs_diff_df_2.colums.values.tolist().index(_abs_diff_df.colums[0])
+        _start_of_mon = _abs_diff_df_2.columns.values.tolist().index(_abs_diff_df.columns[0])
         _end_of_mon = _start_of_mon + _abs_diff_df.shape[1]
         print(_start_of_mon, _end_of_mon)
         X, Y = np.meshgrid(np.arange(_orig_col), np.arange(_orig_row + 1), indexing="xy")
@@ -370,9 +370,9 @@ def reader_and_export(
         
 
         assert (X_1.shape == _abs_diff_df.values.shape) and (Y_1.shape == _abs_diff_df.values.shape)
-        X_1 = np.where(_abs_diff_df.values > abs_tolerance_in_pct, X_1, np. inf)
-        Y_1 = np.where(_abs_diff_df.values > abs_tolerance_in_pct, Y_1, np. inf)
-        XY_idx = pd.vatarrane( X_1 ).replace([np.inf, -np.inf], np.nan) .stack(future_stack=True).dropna().to_frame()
+        X_1 = np.where(_abs_diff_df.values > abs_tolerance_in_pct, X_1, np.inf)
+        Y_1 = np.where(_abs_diff_df.values > abs_tolerance_in_pct, Y_1, np.inf)
+        XY_idx = pd.DataFrame( X_1 ).replace([np.inf, -np.inf], np.nan) .stack(future_stack=True).dropna().to_frame()
         XY_idx.columns = ["i"]
         XY_idx["j"] = pd.DataFrame( Y_1 ).replace([np.inf, -np.inf], np.nan).stack(future_stack=True) .dropna()
         for i, j in XY_idx[["i", "j"]].values:
@@ -439,39 +439,39 @@ def reader_and_export(
 
 
 
-
-
-
-    filtered_df = _abs_diff_df[_abs_diff_df.gt(abs_tolerance_in_pct).any(axis=1)]
-
-    # Get SCN_IDs and associated metadata
-    filtered_ids = filtered_df.index.get_level_values("SCN_ID").unique().tolist()
+    
+    
+    
+    
+    scn_ids = _combined_checks_above_tol_list_df["SCN_ID"].astype("int64")
+    final_scn_ids = _df.filter(pl.col("SCN_ID").is_in(scn_ids)).select("SCN_NAME").unique().to_series().to_list()
+    final_curve_code = _df.filter(pl.col("CURVE_CODE").is_in(_combined_checks_above_tol_list_df["CURVE_CODE"])).select("CURVE_CODE").unique().to_series().to_list()
 
     # Prepare the summary output
     summary_data = {
         "Threshold": [f"Abs ({abs_tolerance_in_pct}%)"],
-        "Records found greater than threshold": [len(filtered_df)],
-        "Scenarios": [sorted(set(_df.filter(pl.col("SCN_ID").is_in(filtered_ids))["SCN_NAME"].unique().to_list()))],
-        "Curve": [sorted(set(_df.filter(pl.col("SCN_ID").is_in(filtered_ids))["CURVE_CODE"].unique().to_list()))],
+        "Records found greater than threshold": [len(_combined_checks_above_tol_list_df)],
+        "Scenarios": [", ".join(map(str,final_scn_ids))],
+        "Curve": [", ".join(map(str,final_curve_code))],
         "CCY": [sorted(set(_df.filter(pl.col("SCN_ID").is_in(filtered_ids))["CCY_CODE"].unique().to_list()))]
     }
 
-    # Write results to Excel
-    with pd.ExcelWriter(output_filename, engine="openpyxl", mode="a", if_sheet_exists="replace") as writer:
-        if not filtered_df.empty:
-            filtered_df.to_excel(writer, sheet_name="VARIENCE_SUMMARY", index=False)
+    _combined_checks_above_tol_list_df = pd.concat(_combined_checks_above_tol_list, axis = 0).reset_index()
+    with pd.ExcelWriter(output_filename, engine="openpyxl", mode="a", if_sheet_exists="overlay") as writer:
+        if not _combined_checks_above_tol_list_df.empty:
+            _combined_checks_above_tol_list_df.to_excel(writer, sheet_name="VARIENCE_SUMMARY", index=False)
         else:
             pd.DataFrame({"DATASET_ID": ["No variance found"]}).to_excel(writer, sheet_name="VARIENCE_SUMMARY", index=False)
 
         # Write summary at right side
         pd.DataFrame(summary_data).T.to_excel(writer, sheet_name="VARIENCE_SUMMARY", startcol=11, startrow=1, header=False)
     
-    with pd.ExcelWriter(output_filename, engine="openpyxl", mode="a", if_sheet_exists='replace') as writer:
-        no_values_message.to_excel(
-            writer,
-            sheet_name="VARIENCE_SUMMARY",
-            index=False  # Do not include the index in the Excel sheet
-        )
+    # with pd.ExcelWriter(output_filename, engine="openpyxl", mode="a", if_sheet_exists='replace') as writer:
+    #     no_values_message.to_excel(
+    #         writer,
+    #         sheet_name="VARIENCE_SUMMARY",
+    #         index=False  # Do not include the index in the Excel sheet
+    #     )
 
     wb = load_workbook(output_filename)
     wb.move_sheet("VARIENCE_SUMMARY", -(len(wb.sheetnames)-1))
@@ -489,18 +489,13 @@ def reader_and_export(
 
 
 
-
-
-
-
-
     for ws in wb.worksheets:
         ws.sheet_view.zoomScale = 75
     highlight_fill = PatternFill(start_color="00FFFF00", end_color="00FFFF00", fill_type="solid")
-    for row in ws.iter_rows():
+    for row in sheet.iter_rows():
         for cell in row:
             try:
-                value = float(cell.value)
+                value = float(cell.value) if cell.value is not None else None
                 if cell.value is not None and value > 0.7:
                     cell.fill = highlight_fill
                     print(f"Changed color for cell {cell.coordinate} with value {value}")
@@ -508,9 +503,12 @@ def reader_and_export(
                 continue
 
     wb.save(output_filename)
+    wb.close()
     return _abs_diff_df
 
 def main():
+    import argparse
+    import time
     parser = argparse.ArgumentParser(
         prog="ReaderIRCurve",
         description="This exports the IRCurve differences between Current Month vs Prior Month.",
